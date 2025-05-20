@@ -1,13 +1,14 @@
 import pandas as pd
+import csv
+import re
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
-excel_path       = "WOS_Filtered.xlsx"            # your input Excel file
-tabdelim_path    = "TabDelimited_Filtered.txt"    # output #1: tab-delimited file
-plaintext_path   = "PlainText_Filtered.txt"       # output #2: plain-text WOS tagged format
-last_column_name = "UT (Unique WOS ID)"  # drop columns after this
+excel_path     = "merged_WoS_format.xlsx"
+tabdelim_path  = "TabDelimited_Filtered.txt"
+plaintext_path = "PlainText_Filtered.txt"
 # ────────────────────────────────────────────────────────────────────────────────
 
-# 1) Map Excel headers → WOS short codes
+# 1) Excel header → WOS tag
 col_map = {
     "Publication Type":    "PT",
     "Authors":             "AU",
@@ -82,98 +83,87 @@ col_map = {
     "UT (Unique WOS ID)":  "UT"
 }
 
-# Load Excel file
+reverse_map = {v: k for k, v in col_map.items()}
+
+# 2) Load Excel and rename to tags
 df = pd.read_excel(excel_path, dtype=str)
+df.rename(columns={full: tag for full, tag in col_map.items() if full in df.columns},
+          inplace=True)
 
-# Map Excel headers to WoS short codes
-df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-print("Columns after renaming:", df.columns.tolist())
-
-# Check for critical columns
-critical_cols = ["TI", "SO", "AU"]
-missing_critical = [col for col in critical_cols if col not in df.columns]
-if missing_critical:
-    raise ValueError(f"Missing critical columns: {missing_critical}. Update col_map.")
-
-# Generate placeholder UT if missing
+# 3) Ensure UT column exists and fill placeholders
 if "UT" not in df.columns:
-    print("UT column not found. Generating placeholders for all records.")
-    df["UT"] = [f"SCOPUS:ID{idx:06d}" for idx in range(len(df))]
+    df["UT"] = [f"ID{idx:06d}" for idx in range(len(df))]
 else:
-    def generate_ut(row, idx):
-        if pd.notna(row["UT"]) and str(row["UT"]).strip():
-            return row["UT"]
-        if pd.notna(row.get("DI")) and str(row["DI"]).strip():
-            return f"SCOPUS:{row['DI']}"
-        return f"SCOPUS:ID{idx:06d}"
-    df["UT"] = [generate_ut(row, idx) for idx, row in df.iterrows()]
+    def make_ut(row, idx):
+        ut = row.get("UT","")
+        if pd.notna(ut) and str(ut).strip():
+            return str(ut).strip()
+        doi = row.get("DI","")
+        if pd.notna(doi) and str(doi).strip():
+            return f"SCOPUS:{str(doi).strip()}"
+        return f"ID{idx:06d}"
+    df["UT"] = [make_ut(row, i) for i, row in df.iterrows()]
 
-# Deduplicate based on critical columns
-print("Rows before deduplication:", len(df))
-df = df.drop_duplicates(subset=critical_cols, keep="first")
-print("Rows after deduplication:", len(df))
+# 4) Deduplicate on Title+Author+Source
+print(f"Rows before dedupe: {len(df)}")
+df.drop_duplicates(subset=["TI","AU","SO"], keep="first", inplace=True)
+print(f"Rows after dedupe:  {len(df)}")
 
-# Normalize field separators
-def normalize_field(s):
-    if pd.isna(s) or not str(s).strip():
-        return ""
-    return str(s).replace(",", ";").strip()
+# 5) Clean newlines in all fields
+def clean_val(x):
+    return "" if pd.isna(x) else str(x).replace("\r"," ").replace("\n"," ").strip()
+df = df.applymap(clean_val)
 
-for col in ["AU", "AF", "C1", "CR", "DE", "ID"]:
+# 6) Normalize list fields except addresses/affiliations
+for col in ["AU","AF","DE","ID","CR"]:
     if col in df.columns:
-        df[col] = df[col].apply(normalize_field)
+        df[col] = df[col].str.replace(",", ";")
 
-# Output 1: Tab-delimited file
-df.to_csv(tabdelim_path, sep="\t", index=False, encoding="utf-8")
-print(f"Tab-delimited file written to {tabdelim_path}")
+# 7) Write Tab‑Delimited for VOSviewer (no quoting, preserve C1 commas)
+df.to_csv(
+    tabdelim_path,
+    sep="\t",
+    index=False,
+    encoding="utf-8",
+    quoting=csv.QUOTE_NONE,
+    escapechar="\\"
+)
+print(f"Tab‑delimited written: {tabdelim_path}")
 
-# Output 2: Plaintext file in WoS format
-def format_list_field(s, tag):
-    if pd.isna(s) or not str(s).strip():
-        return []
-    parts = [p.strip() for p in str(s).split(";") if p.strip()]
-    if not parts:
-        return []
-    lines = [f"{tag} {parts[0]}"]
-    lines += [f"   {p}" for p in parts[1:]]
-    return lines
-
-tag_order = [
-    "PT", "AU", "AF", "TI", "SO", "LA", "DT", "DE", "ID", "AB", "C1", "C3", "RP", "EM",
-    "RI", "OI", "CR", "NR", "TC", "Z9", "U1", "U2", "PU", "PI", "PA", "SN", "EI", "J9", "JI",
-    "PD", "PY", "DI", "EA", "PG", "WC", "WE", "SC", "GA", "UT", "OA", "DA"
+# 8) Generate PlainText for Biblioshiny
+tags = [
+    "PT","AU","AF","TI","SO","LA","DT","DE","ID","AB","C1","C3","RP","EM",
+    "RI","OI","CR","NR","TC","Z9","U1","U2","PU","PI","PA","SN","EI","J9","JI",
+    "PD","PY","DI","EA","PG","WC","WE","SC","GA","UT","OA","DA"
 ]
 
 lines = ["FN Clarivate Analytics Web of Science", "VR 1.0"]
-skipped_records = 0
+
 for idx, row in df.iterrows():
-    record = []
-    has_critical = all(pd.notna(row[col]) and str(row[col]).strip() for col in critical_cols)
-    for tag in tag_order:
-        val = row.get(tag)
-        if pd.isna(val) or not str(val).strip():
-            continue
-        if tag in {"AU", "AF", "C1", "CR"}:
-            formatted = format_list_field(val, tag)
-            if formatted:
-                record += formatted
+    # fallback TI from AB if missing
+    if not row.get("TI","").strip():
+        ab = row.get("AB","")
+        if ab:
+            df.at[idx, "TI"] = ab[:80].strip()
+            row["TI"] = df.at[idx, "TI"]
+    # start record with PT
+    rec = [f"PT {row.get('PT','').strip()}"]
+    # append other fields
+    for tag in tags[1:]:
+        val = row.get(tag,"")
+        if not val: continue
+        if tag in {"AU","AF","C1","CR"}:
+            parts = [p.strip() for p in val.split(";") if p.strip()]
+            rec.append(f"{tag} {parts[0]}")
+            rec += [f"   {p}" for p in parts[1:]]
         else:
-            record.append(f"{tag} {val}")
-    if record and has_critical:
-        lines.extend(record)
-        lines.append("ER")
-        lines.append("")
-    else:
-        skipped_records += 1
-        print(f"Skipped record {idx}: Missing critical fields")
+            rec.append(f"{tag} {val}")
+    rec.append("ER")
+    lines.extend(rec)
+    lines.append("")
 
 with open(plaintext_path, "w", encoding="utf-8") as f:
     f.write("\n".join(lines))
 
-# Diagnostics
-print(f"Plaintext file written to {plaintext_path}")
-print(f"Records processed: {len(df) - skipped_records}")
-print(f"Records skipped: {skipped_records}")
-with open(plaintext_path, "r", encoding="utf-8") as f:
-    er_count = f.read().count("ER")
-
+print(f"Plain‑text written: {plaintext_path}")
+print(f"Total records written: {len(df)}")
