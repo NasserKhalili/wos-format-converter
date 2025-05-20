@@ -1,5 +1,6 @@
 import pandas as pd
- 
+import csv
+
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 tabdelim_path    = "TabDelimited.txt"    # input #1: tab-delimited WOS file
 excel_path       = "WOS.xlsx"            # output #1: Excel file
@@ -82,7 +83,14 @@ col_map = {
 }
 
 # 2) Read the TabDelimited.txt
-df = pd.read_csv(tabdelim_path, sep="\t", dtype=str).fillna("")
+df = pd.read_csv(
+    tabdelim_path,
+    sep="\t",
+    dtype=str,
+    engine="python",
+    quoting=csv.QUOTE_NONE,
+    on_bad_lines="warn",    # or "skip" to drop bad lines silently
+).fillna("")
 
 # 3) Rename columns back to Excel headers
 df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
