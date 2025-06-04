@@ -2,7 +2,7 @@ import pandas as pd
 import csv
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
-excel_path = "merged_WOS_format_final.xlsx"
+excel_path = "merged_WOS_format.xlsx"
 tabdelim_path = "TabDelimited_Filtered3.txt"
 plaintext_path = "PlainText_Filtered3.txt"
 
